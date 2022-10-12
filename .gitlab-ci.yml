@@ -1,0 +1,93 @@
+image: registry.gitlab.com/gitlab-org/terraform-images/branches/v0-3-3-0.13:f3d81c8420c55c8101932e8a93bc16ea779450f3
+variables:
+  TF_ROOT: ${CI_PROJECT_DIR}
+  TF_ADDRESS: ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/${CI_PROJECT_NAME}
+
+cache:
+  key: example-production
+  paths:
+    - ${TF_ROOT}/.terraform
+
+before_script:
+  - cd ${TF_ROOT}
+
+stages:
+  - prepare
+  - validate
+  - build
+  - deploy
+  - post_deploy
+  - destroy
+
+init:
+  stage: prepare
+  script:
+    - gitlab-terraform init
+
+validate:
+  stage: validate
+  script:
+    - gitlab-terraform validate
+
+plan:
+  stage: build
+  script:
+    - gitlab-terraform plan
+    - gitlab-terraform plan-json
+  artifacts:
+    name: plan
+    paths:
+      - ${TF_ROOT}/plan.cache
+    reports:
+      terraform: ${TF_ROOT}/plan.json
+
+apply:
+  stage: deploy
+  environment:
+    name: production
+  script:
+    - gitlab-terraform apply
+    - gitlab-terraform output  > output.json
+  dependencies:
+    - plan
+  artifacts:
+    name: output
+    paths:
+      - ${TF_ROOT}/output.json
+    reports:
+      terraform:
+        - ${TF_ROOT}/output.json 
+  only:
+    - master
+
+#si el apply falla este job no se ejecuta y por lo tanto el pipeline padre queda en pausa para reanudarlo de forma manual
+post_apply:
+  stage: post_deploy
+  script:
+    - apk add curl jq
+    - echo "${TRIGGERER_PIPELINE_ID}"
+    - echo "${TRIGGERER_PROJECT_ID}"
+    #- cat ${TF_ROOT}/output.json 
+    - >
+      GITLAB_MANUAL_JOB=$(curl -s --header "PRIVATE-TOKEN: $GITLAB_API_KEY" "https://gitlab.com/api/v4/projects/${TRIGGERER_PROJECT_ID}/pipelines/${TRIGGERER_PIPELINE_ID}/jobs" | jq -r 'map(select(.status == "manual"))[].id');
+      echo $GITLAB_MANUAL_JOB;
+      curl -s -X POST --header "PRIVATE-TOKEN: $GITLAB_API_KEY" "https://gitlab.com/api/v4/projects/${TRIGGERER_PROJECT_ID}/jobs/${GITLAB_MANUAL_JOB}/play" | jq;
+  dependencies:
+     - apply   
+  only:
+    refs:
+      - pipelines
+
+# Separate destoy job for manual launching Terraform as it can be destructive
+# action.
+destroy:
+  stage: destroy
+  environment:
+    name: production
+  script:
+    - gitlab-terraform destroy
+  dependencies:
+    - apply
+  when: manual
+  only:
+    - master
